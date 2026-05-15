@@ -1,5 +1,5 @@
-API_KEY = 'eQRE2IoS3ozOzYHgDzLF4P3nOkIEVoMZtkVjlzRWURnbqKEpkbTYoSXP5silKN6a'
-SECRET = 'lFXZunP4Od3MXr7BdSIo1l8cbjdOKvmnNpw38zuEH0Sa8plR12EOEqdlN7EJjCaX'
+API_KEY = 'eQ'
+SECRET = 'lF'
 
 BASE_URL = 'https://testnet.binance.vision/key/api/v3/order'
 
