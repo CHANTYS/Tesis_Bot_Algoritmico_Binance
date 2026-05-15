@@ -25,6 +25,7 @@ logging.basicConfig(
 
 
  #            Constructor de la clase: Inicializa el entorno de trading.
+ 
 class TesisTradingBot:
     def __init__(self, symbol='BTCUSDT', trade_qty=0.001):
         self.symbol = symbol
