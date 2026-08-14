@@ -1,11 +1,13 @@
 1. Introducción
+
+   
 El presente manual describe cómo instalar, configurar y operar el sistema de trading algorítmico desarrollado en el marco del Trabajo Final de Grado. El sistema permite:
 •	Ejecutar cuatro estrategias de backtesting histórico (90 días, temporalidad 15 minutos) sobre el par BTC/USDT.
 •	Operar motores en vivo sobre Binance Futures Testnet (sin capital real).
 •	Controlar todo el ciclo de vida del sistema de forma remota mediante un bot de Telegram.
 •	Recibir dashboards gráficos y métricas de rendimiento (PnL, Win Rate, Sharpe, Max Drawdown) por el mismo canal.
 El alcance operativo se limita al entorno de simulación (Testnet). No se contempla el uso con dinero real en el marco de este TFG.
-2. Requisitos previos
+3. Requisitos previos
 2.1. Hardware y sistema operativo
 •	Equipo con acceso a Internet estable (recomendado: VPS o PC siempre encendido si se desean sesiones largas en vivo).
 •	Sistema operativo compatible con Python 3.10 o superior (Linux, Windows o macOS).
