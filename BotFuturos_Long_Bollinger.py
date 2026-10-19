@@ -1,7 +1,9 @@
 import os
+import sys
 import logging
 import asyncio
 import json
+import socket
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -14,14 +16,23 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 import requests
+import aiohttp
+from aiohttp.resolver import ThreadedResolver
 from binance import AsyncClient, BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 
-# --- CONFIGURACION DE LOGGING ---
+# --- FIX DE CODIFICACION PARA LOGS INDIVIDUALES ---
+if sys.platform == 'win32':
+    try: sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError: pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
-    handlers=[logging.FileHandler("trading_futures_long_bb.log"), logging.StreamHandler()]
+    handlers=[
+        logging.FileHandler("trading_futures_long_bb.log", encoding='utf-8'), 
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -29,7 +40,7 @@ class Config:
     load_dotenv()
     SYMBOL = 'BTCUSDT'
     QTY = 0.002 
-    INTERVAL = AsyncClient.KLINE_INTERVAL_15MINUTE # 15m para Bollinger Rebound
+    INTERVAL = AsyncClient.KLINE_INTERVAL_1MINUTE
     LEVERAGE = 10
     RISK_REWARD_RATIO = 3.0  
     ATR_MULTIPLIER = 3.0     
@@ -54,17 +65,16 @@ class TradingVisualizer:
         fig.set_facecolor('#0d1117')
         gs = gridspec.GridSpec(5, 1, height_ratios=[3, 1, 1, 1, 0.8], hspace=0.3)
 
-        # 1. PANEL PRECIO + EMA + BOLLINGER
         ax1 = fig.add_subplot(gs[0])
         ax1.set_facecolor('#0d1117')
         ax1.plot(df_plot.index, df_plot['close'], color='#58a6ff', lw=1.5, label=f"Precio {Config.SYMBOL}")
         if 'EMA_200' in df_plot.columns:
             ax1.plot(df_plot.index, df_plot['EMA_200'], color='#f0883e', ls='--', alpha=0.6, label="EMA 200")
         
-        # Bandas de Bollinger
-        ax1.plot(df_plot.index, df_plot['BBU'], color='#3fb950', ls=':', alpha=0.3)
-        ax1.plot(df_plot.index, df_plot['BBL'], color='#f85149', ls=':', alpha=0.3)
-        ax1.fill_between(df_plot.index, df_plot['BBL'], df_plot['BBU'], color='#bc8cff', alpha=0.03)
+        if 'BBU' in df_plot.columns and 'BBL' in df_plot.columns:
+            ax1.plot(df_plot.index, df_plot['BBU'], color='#3fb950', ls=':', alpha=0.3)
+            ax1.plot(df_plot.index, df_plot['BBL'], color='#f85149', ls=':', alpha=0.3)
+            ax1.fill_between(df_plot.index, df_plot['BBL'], df_plot['BBU'], color='#bc8cff', alpha=0.03)
         
         for t in trades:
             try:
@@ -79,7 +89,6 @@ class TradingVisualizer:
         ax1.legend(loc='upper left', frameon=False)
         ax1.grid(color='#30363d', alpha=0.3)
 
-        # 2. PANEL MACD
         ax2 = fig.add_subplot(gs[1], sharex=ax1)
         if 'MACD' in df_plot.columns:
             ax2.plot(df_plot.index, df_plot['MACD'], color='#58a6ff', lw=1)
@@ -88,7 +97,6 @@ class TradingVisualizer:
             ax2.bar(df_plot.index, df_plot['MACDh'], color=colors, alpha=0.5)
         ax2.set_ylabel("MACD", fontsize=10)
 
-        # 3. PANEL STOCH RSI
         ax3 = fig.add_subplot(gs[2], sharex=ax1)
         if 'STOCH_K' in df_plot.columns:
             ax3.plot(df_plot.index, df_plot['STOCH_K'], color='#bc8cff', lw=1.2)
@@ -96,7 +104,6 @@ class TradingVisualizer:
             ax3.axhline(20, color='#3fb950', ls=':', alpha=0.5)
         ax3.set_ylabel("Stoch RSI", fontsize=10)
 
-        # 4. PANEL RSI 14
         ax4 = fig.add_subplot(gs[3], sharex=ax1)
         if 'RSI_14' in df_plot.columns:
             ax4.plot(df_plot.index, df_plot['RSI_14'], color='#3fb950', lw=1.2)
@@ -106,16 +113,15 @@ class TradingVisualizer:
         ax4.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=df_plot.index.tz))
         plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
-        # 5. RESUMEN EJECUTIVO (KPIs)
         ax5 = fig.add_subplot(gs[4])
         ax5.axis('off')
         summary_text = (
-            f"RESUMEN DE SESIÓN: BOLLINGER REBOUND (LONG)\n"
+            f"RESUMEN DE SESION: BOLLINGER REBOUND (LONG)\n"
             f"{'='*60}\n"
             f"Operaciones Totales: {stats['total_trades']}  |  Win Rate: {stats['win_rate']:.2f}%\n"
             f"PnL Neto Total: ${stats['net_pnl']:.4f}  |  Comisiones: ${stats['total_commissions']:.4f}\n"
             f"Profit Factor: {stats['profit_factor']:.2f}  |  Ratio de Sharpe: {stats['sharpe_ratio']:.2f}\n"
-            f"Máximo Drawdown: ${stats['max_drawdown']:.2f}"
+            f"Maximo Drawdown: ${stats['max_drawdown']:.2f}"
         )
         ax5.text(0.5, 0.5, summary_text, fontsize=13, ha='center', va='center', family='monospace',
                  bbox=dict(boxstyle="round", facecolor='#161b22', edgecolor='#30363d', pad=1))
@@ -131,6 +137,7 @@ class EliteTradingEngine:
         self.data = pd.DataFrame()
         self.trades = self.load_history() 
         self.active_trade = None
+        self.is_running = False
 
     def load_history(self):
         if os.path.exists(Config.HISTORY_FILE):
@@ -213,7 +220,18 @@ class EliteTradingEngine:
         except Exception as e: logger.error(f"Error Orden: {e}")
 
     async def run(self):
-        self.client = await AsyncClient.create(Config.BINANCE_KEY, Config.BINANCE_SECRET, testnet=True)
+        custom_connector = aiohttp.TCPConnector(
+            resolver=ThreadedResolver(),
+            family=socket.AF_INET,
+            ssl=False
+        )
+
+        self.client = await AsyncClient.create(
+            Config.BINANCE_KEY, 
+            Config.BINANCE_SECRET, 
+            testnet=True,
+            session_params={'connector': custom_connector}
+        )
         self.client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi/v1'
         
         try:
@@ -224,62 +242,74 @@ class EliteTradingEngine:
         logger.info("Bot Long Bollinger Rebound Activo (15m)...")
         self.send_telegram_msg("🚀 <b>Bot Long Bollinger Conectado</b>")
         
+        self.is_running = True
         try:
-            bm = BinanceSocketManager(self.client)
-            async with bm.futures_multiplex_socket([f"{Config.SYMBOL.lower()}@kline_15m"]) as stream:
-                while True:
-                    res = await stream.recv()
-                    if not res or 'data' not in res: continue
-                    k = res['data']['k']
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {Config.SYMBOL} ${k['c']} | OK", end='\r')
-                    
-                    if k['x']: # Al cierre de vela
-                        klines = await self.client.futures_historical_klines(Config.SYMBOL, Config.INTERVAL, "5 days ago UTC")
-                        df = pd.DataFrame(klines).iloc[:, :6]
-                        df.columns = ['ts', 'open', 'high', 'low', 'close', 'vol']
-                        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-                        df.set_index('ts', inplace=True)
-                        self.data = df.astype(float)
-                        
-                        # Indicadores
-                        self.data['EMA_200'] = ta.ema(self.data['close'], length=200)
-                        self.data['RSI_14'] = ta.rsi(self.data['close'], length=14)
-                        bb = ta.bbands(self.data['close'], length=20, std=2)
-                        self.data['BBL'] = bb.iloc[:, 0]
-                        self.data['BBU'] = bb.iloc[:, 2]
-                        
-                        # Data para Dashboard
-                        macd = ta.macd(self.data['close'])
-                        if macd is not None:
-                            self.data['MACD'], self.data['MACDh'], self.data['MACDs'] = macd.iloc[:,0], macd.iloc[:,1], macd.iloc[:,2]
-                        stoch = ta.stochrsi(self.data['close'])
-                        if stoch is not None: self.data['STOCH_K'] = stoch.iloc[:, 0]
-                        self.data['ATR'] = ta.atr(self.data['high'], self.data['low'], self.data['close'], length=14)
+            while self.is_running:
+                try:
+                    bm = BinanceSocketManager(self.client)
+                    async with bm.futures_multiplex_socket([f"{Config.SYMBOL.lower()}@kline_15m"]) as stream:
+                        while self.is_running:
+                            res = await stream.recv()
+                            if not res or 'data' not in res: continue
+                            k = res['data']['k']
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] {Config.SYMBOL} ${k['c']} | OK", end='\r')
+                            
+                            if k['x']:
+                                klines = await self.client.futures_historical_klines(Config.SYMBOL, AsyncClient.KLINE_INTERVAL_15MINUTE, "5 days ago UTC")
+                                df = pd.DataFrame(klines).iloc[:, :6]
+                                df.columns = ['ts', 'open', 'high', 'low', 'close', 'vol']
+                                df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+                                df.set_index('ts', inplace=True)
+                                self.data = df.astype(float)
+                                
+                                self.data['EMA_200'] = ta.ema(self.data['close'], length=200)
+                                self.data['RSI_14'] = ta.rsi(self.data['close'], length=14)
+                                bb = ta.bbands(self.data['close'], length=20, std=2)
+                                self.data['BBL'] = bb.iloc[:, 0]
+                                self.data['BBU'] = bb.iloc[:, 2]
+                                
+                                macd = ta.macd(self.data['close'])
+                                if macd is not None:
+                                    self.data['MACD'], self.data['MACDh'], self.data['MACDs'] = macd.iloc[:,0], macd.iloc[:,1], macd.iloc[:,2]
+                                stoch = ta.stochrsi(self.data['close'])
+                                if stoch is not None: self.data['STOCH_K'] = stoch.iloc[:, 0]
+                                self.data['ATR'] = ta.atr(self.data['high'], self.data['low'], self.data['close'], length=14)
 
-                        last = self.data.iloc[-1]
-                        prev = self.data.iloc[-2]
-                        price = last['close']
+                                last = self.data.iloc[-1]
+                                prev = self.data.iloc[-2]
+                                price = last['close']
 
-                        if not self.active_trade:
-                            # Lógica Bollinger Rebound
-                            if price > last['EMA_200'] and prev['close'] < prev['BBL'] and last['RSI_14'] > 30:
-                                risk = last['ATR'] * Config.ATR_MULTIPLIER
-                                await self.execute_order('BUY', 'LONG', price, self.data.index[-1], price - risk, price + (risk * Config.RISK_REWARD_RATIO))
-                        else:
-                            t = self.active_trade
-                            if price >= t['tp'] or price <= t['sl']:
-                                await self.execute_order('SELL', 'CIERRE', price, self.data.index[-1])
+                                if not self.active_trade:
+                                    if price > last['EMA_200'] and prev['close'] < prev['BBL'] and last['RSI_14'] > 30:
+                                        risk = last['ATR'] * Config.ATR_MULTIPLIER
+                                        await self.execute_order('BUY', 'LONG', price, self.data.index[-1], price - risk, price + (risk * Config.RISK_REWARD_RATIO))
+                                else:
+                                    t = self.active_trade
+                                    if price >= t['tp'] or price <= t['sl']:
+                                        await self.execute_order('SELL', 'CIERRE', price, self.data.index[-1])
+                                        
+                except asyncio.CancelledError:
+                    self.is_running = False
+                    raise 
+                except Exception as e:
+                    if self.is_running:
+                        logger.error(f"⚠️ Caida de red detectada: {e}. Reconectando en 15s...")
+                        await asyncio.sleep(15)
+
         except asyncio.CancelledError:
-            logger.info("El bot ha sido detenido por el Manager.")
+            logger.info("ℹ️ Tarea de bot Long Bollinger detenida.")
         finally:
-            # CIERRE SEGURO Y REPORTE
             logger.info("Generando reporte y cerrando conexiones...")
             stats = self.get_summary()
             if not self.data.empty:
                 path = TradingVisualizer.generate_dashboard(self.data, self.trades, stats)
                 if path: self.send_telegram_photo(path, stats)
+            
+            # Cierre seguro validando si el motor asincrono sigue vivo
             if self.client:
-                await self.client.close_connection()
-
-if __name__ == "__main__":
-    asyncio.run(EliteTradingEngine().run())
+                try:
+                    loop = asyncio.get_running_loop()
+                    if loop.is_running():
+                        await self.client.close_connection()
+                except RuntimeError:
+                    pass
